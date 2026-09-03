@@ -1,0 +1,12 @@
+gptp-refclock
+gptp-pps-offset
+libgptp.a
+*.o
+*.log
+*.csv
+*.err
+.DS_Store
+PLAN.md
+CLAUDE.local.md
+tsdump
+*.dSYM/
