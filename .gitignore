@@ -3,6 +3,7 @@ gptp-pps-offset
 libgptp.a
 *.o
 *.log
+*.jsonl
 *.csv
 *.err
 .DS_Store

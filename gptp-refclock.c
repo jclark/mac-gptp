@@ -17,7 +17,6 @@
  * writes everything.  libgptp talks to the framework; chrony-client.[ch] is
  * the SOCK client. */
 #include <errno.h>
-#include <fcntl.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <math.h>
@@ -42,27 +41,36 @@
 /* defaults of the options */
 #define DEFAULT_SOCK_PATH "/var/run/chrony.gptp.sock"
 #define DEFAULT_INTERVAL_S 1.0
+#define DEFAULT_PORT_RETRY_S 1.0	/* between attempts to restore a missing port */
 #define DEFAULT_UTC_OFFSET 37		/* TAI - UTC since 2017-01-01; the announce's value is not reachable */
 #define DEFAULT_SETTLE_S 5.0		/* locked to the same grandmaster for this long before sending */
-#define DEFAULT_BRACKETS 4		/* clock readings per sample; the narrowest counts */
+#define DEFAULT_BRACKETS 4U		/* clock readings per sample; the narrowest counts */
 #define DEFAULT_MAX_BRACKET_US 5.0	/* a wider bracket was preempted */
 #define DEFAULT_TIMEOUT_S 2.0		/* waiting for the TimeSync daemon */
 #define POLL_SLEEP_NS 100000000		/* the main loop's wait is chopped so a signal ends it promptly */
 #define EVENT_RING 64			/* events recorded by the framework thread, awaiting the main loop */
 #define OS_LOG_SUBSYSTEM "com.jclark.gptp"
+#define MAX_INTERVAL_S 3600.0
+#define MAX_PORT_RETRY_S 3600.0
+#define MAX_SETTLE_S 86400.0
+#define MAX_TIMEOUT_S 60.0
+#define MAX_BRACKET_US 1000000.0
+#define MAX_BRACKETS 1000U
+#define MAX_UTC_OFFSET 1000U
 
 
 static struct config {
 	const char *interface;
 	const char *sock_path;
-	double interval_s, settle_s, timeout_s;
+	double interval_s, port_retry_s, settle_s, timeout_s;
 	int utc_offset;
 	unsigned brackets;
 	double max_bracket_us;
 	const char *log_path;
-	bool json, os_log, debug;
+	bool json, os_log;
 } cfg = {
-	.sock_path = DEFAULT_SOCK_PATH, .interval_s = DEFAULT_INTERVAL_S, .settle_s = DEFAULT_SETTLE_S,
+	.sock_path = DEFAULT_SOCK_PATH, .interval_s = DEFAULT_INTERVAL_S, .port_retry_s = DEFAULT_PORT_RETRY_S,
+	.settle_s = DEFAULT_SETTLE_S,
 	.timeout_s = DEFAULT_TIMEOUT_S, .utc_offset = DEFAULT_UTC_OFFSET, .brackets = DEFAULT_BRACKETS,
 	.max_bracket_us = DEFAULT_MAX_BRACKET_US,
 };
@@ -95,16 +103,15 @@ static struct {
 static struct {
 	enum state state;
 	bool have_state;
-	uint64_t settle_start_mach, settle_gm;
+	uint64_t settle_start_mach, settle_gm, next_port_retry_mach;
 	uint64_t samples, sent, state_changes, wide_brackets;
-	bool header_done, chrony_failing;
+	bool header_done, chrony_failing, mapping_failing, port_retry_failing;
 } run;
 
 /* ---- time helpers ---------------------------------------------------- */
 
-static double mach_to_s(uint64_t ticks) { return (double)ticks * timebase.numer / timebase.denom * 1e-9; }
-static int64_t mach_to_ns(int64_t ticks) { return ticks * timebase.numer / timebase.denom; }
-static uint64_t s_to_mach(double s) { return (uint64_t)llround(s * 1e9 * timebase.denom / timebase.numer); }
+static double mach_to_s(uint64_t ticks) { return (double)gptp_mach_to_ns((int64_t)ticks) * 1e-9; }
+static uint64_t seconds_to_mach(double s) { return gptp_ns_to_mach((int64_t)llround(s * 1e9)); }
 static double since_start_s(void) { return mach_to_s(mach_absolute_time() - start_mach); }
 
 /* An event line: to stderr, or with --os-log to the unified log.  Only the
@@ -117,15 +124,18 @@ static void note_at(uint64_t mach, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(msg, sizeof(msg), fmt, ap);
 	va_end(ap);
-	if (cfg.os_log) { os_log(oslog, "%{public}s", msg); return; }
 	/* the event's own time, as UTC date and time */
 	int64_t now_ns = (int64_t)clock_gettime_nsec_np(CLOCK_REALTIME);
-	int64_t at_ns = now_ns - mach_to_ns((int64_t)(mach_absolute_time() - mach));
+	int64_t at_ns = now_ns - gptp_mach_to_ns((int64_t)(mach_absolute_time() - mach));
 	time_t secs = (time_t)(at_ns / NS_PER_S);
 	struct tm tm;
 	gmtime_r(&secs, &tm);
 	char stamp[32];
 	strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+	if (cfg.os_log) {
+		os_log(oslog, "event time %{public}s.%03ld UTC: %{public}s", stamp, (long)(at_ns % NS_PER_S / 1000000), msg);
+		return;
+	}
 	fprintf(stderr, "%s.%03ld %s\n", stamp, (long)(at_ns % NS_PER_S / 1000000), msg);
 }
 #define note(...) note_at(mach_absolute_time(), __VA_ARGS__)
@@ -139,7 +149,7 @@ static bool read_clocks(uint64_t *mach_mid, int64_t *realtime_ns, int64_t *width
 		uint64_t m1 = mach_absolute_time();
 		uint64_t r = clock_gettime_nsec_np(CLOCK_REALTIME);
 		uint64_t m2 = mach_absolute_time();
-		int64_t w = mach_to_ns((int64_t)(m2 - m1));
+		int64_t w = gptp_mach_to_ns((int64_t)(m2 - m1));
 		if (w < best) { best = w; *mach_mid = m1 + (m2 - m1) / 2; *realtime_ns = (int64_t)r; }
 	}
 	*width_ns = best;
@@ -150,7 +160,7 @@ static bool read_clocks(uint64_t *mach_mid, int64_t *realtime_ns, int64_t *width
 static bool gptp_ns_at(uint64_t mach, struct gptp_time *t, int64_t *ns)
 {
 	if (!gptp_time_from_mach(ts, mach, t)) return false;
-	*ns = (int64_t)(t->seconds * (uint64_t)NS_PER_S + t->nanoseconds);
+	*ns = gptp_time_to_ns(t);
 	return true;
 }
 
@@ -197,9 +207,8 @@ static bool drain_events(void)
 }
 
 /* ---- the log line ------------------------------------------------------
- * One column table: the CSV header, the CSV row and the JSON object all
- * come from it, so they cannot disagree; the human line is formatted by
- * hand from the same values. */
+ * The space-separated header and row and the JSON object all come from one
+ * column table, so they cannot disagree. */
 struct col {
 	const char *name;
 	enum { COL_I, COL_U, COL_D, COL_S } kind;
@@ -237,6 +246,8 @@ struct sample {
 
 static void log_line(const struct sample *s)
 {
+	if (!log_out) return;
+
 	char own[24], gm[24], remote[24], used[24];
 	snprintf(own, sizeof(own), "%016" PRIx64, s->dom.clock_identity);
 	snprintf(gm, sizeof(gm), "%016" PRIx64, s->dom.grandmaster_identity);
@@ -271,7 +282,7 @@ static void log_line(const struct sample *s)
 	const size_t ncols = sizeof(cols) / sizeof(cols[0]);
 	size_t k;
 
-	if (!log_out) return;
+	errno = 0;
 	if (cfg.json) {
 		fputc('{', log_out);
 		for (k = 0; k < ncols; k++) {
@@ -290,7 +301,13 @@ static void log_line(const struct sample *s)
 		for (k = 0; k < ncols; k++) { if (k) fputc(' ', log_out); col_value(log_out, &cols[k], false); }
 		fputc('\n', log_out);
 	}
-	fflush(log_out);
+	if (fflush(log_out) == EOF || ferror(log_out)) {
+		int saved_errno = errno ? errno : EIO;
+		FILE *failed = log_out;
+		log_out = NULL;
+		fclose(failed);
+		note("measurement log %s: %s; logging disabled", cfg.log_path, strerror(saved_errno));
+	}
 }
 
 /* ---- one sample ----------------------------------------------------- */
@@ -311,18 +328,47 @@ static enum state classify(const struct sample *s, bool disturbed)
 	return mach_to_s(s->mach - run.settle_start_mach) >= cfg.settle_s ? ST_LOCKED : ST_SETTLING;
 }
 
+static bool read_port_state(struct gptp_port_state *port)
+{
+	char err[256];
+	gptp_port_state(ts, port);
+	if (port->present) {
+		if (run.port_retry_failing) note("gPTP port on %s is available again", cfg.interface);
+		run.port_retry_failing = false;
+		run.next_port_retry_mach = 0;
+		return false;
+	}
+	uint64_t now = mach_absolute_time();
+	if (run.next_port_retry_mach && (int64_t)(run.next_port_retry_mach - now) > 0) return true;
+	run.next_port_retry_mach = now + seconds_to_mach(cfg.port_retry_s);
+	if (!gptp_port_add(ts, cfg.interface, err, sizeof(err))) {
+		if (!run.port_retry_failing) note("%s; will retry", err);
+		run.port_retry_failing = true;
+		return true;
+	}
+	note("gPTP port on %s is available again", cfg.interface);
+	run.port_retry_failing = false;
+	run.next_port_retry_mach = 0;
+	gptp_port_state(ts, port);
+	return true;
+}
+
 static void take_sample(void)
 {
 	struct sample s;
-	bool disturbed;
+	bool disturbed, port_disturbed;
 	char err[256];
 
 	memset(&s, 0, sizeof(s));
+	port_disturbed = read_port_state(&s.port);
 	gptp_domain_state(ts, &s.dom);
-	gptp_port_state(ts, &s.port);
-	s.have_map = gptp_mapping(ts, &s.map, err, sizeof(err));
-	if (!s.have_map && cfg.debug) note("%s", err);
-	gptp_metrics(ts, &s.met);
+	if (log_out) {
+		s.have_map = gptp_mapping(ts, &s.map, err, sizeof(err));
+		if (!s.have_map && !run.mapping_failing) note("%s; mapping fields will be zero", err);
+		else if (s.have_map && run.mapping_failing) note("reading the gPTP mapping again");
+		run.mapping_failing = !s.have_map;
+		gptp_metrics(ts, &s.met);
+	}
 
 	s.bracket_ok = read_clocks(&s.mach, &s.realtime_ns, &s.bracket_ns);
 	if (!s.bracket_ok) run.wide_brackets++;
@@ -330,6 +376,7 @@ static void take_sample(void)
 	s.offset_ns = s.gptp_ns - (int64_t)cfg.utc_offset * NS_PER_S - s.realtime_ns;
 
 	disturbed = drain_events();
+	disturbed = disturbed || port_disturbed;
 	s.syncs = atomic_exchange(&ev.syncs, 0);
 
 	enum state st = classify(&s, disturbed);
@@ -356,7 +403,11 @@ static void take_sample(void)
 			s.sent = true; run.sent++;
 			if (run.chrony_failing) { note("chrony: sending again"); run.chrony_failing = false; }
 		} else if (!run.chrony_failing) {
-			note("chrony: %s: %s (is the refclock line in chrony.conf, and chronyd running?)", cfg.sock_path, strerror(errno));
+			int saved_errno = errno;
+			if (saved_errno == EACCES || saved_errno == EPERM)
+				note("chrony: %s: %s; run gptp-refclock with sudo", cfg.sock_path, strerror(saved_errno));
+			else
+				note("chrony: %s: %s (is the refclock line in chrony.conf, and chronyd running?)", cfg.sock_path, strerror(saved_errno));
 			run.chrony_failing = true;
 		}
 	}
@@ -375,6 +426,7 @@ static void usage(const char *prog)
 "A chrony SOCK refclock from the Mac's gPTP clock on INTERFACE.\n"
 "      --sock PATH             chrony's SOCK refclock socket (%s)\n"
 "      --interval S            seconds between samples (%g)\n"
+"      --port-retry S          seconds between attempts to restore a missing port (%g)\n"
 "      --utc-offset N          TAI minus UTC in seconds (%d)\n"
 "      --settle S              locked and undisturbed for this long before sending (%g)\n"
 "      --brackets N            clock readings per sample; the narrowest counts (%u)\n"
@@ -383,46 +435,63 @@ static void usage(const char *prog)
 "      --log PATH              write one measurement record per sample here; none without it\n"
 "  -j, --json                  the measurement file as JSON lines instead of space-separated columns\n"
 "      --os-log                events to the unified log (subsystem " OS_LOG_SUBSYSTEM ") instead of stderr\n"
-"      --debug                 the mapping's raw numbers in each record\n"
 "  -h, --help\n",
-		prog, DEFAULT_SOCK_PATH, DEFAULT_INTERVAL_S, DEFAULT_UTC_OFFSET, DEFAULT_SETTLE_S, DEFAULT_BRACKETS,
+		prog, DEFAULT_SOCK_PATH, DEFAULT_INTERVAL_S, DEFAULT_PORT_RETRY_S, DEFAULT_UTC_OFFSET, DEFAULT_SETTLE_S, DEFAULT_BRACKETS,
 		DEFAULT_MAX_BRACKET_US, DEFAULT_TIMEOUT_S);
 }
 
-static double arg_double(const char *name, const char *s, double lo)
+static double arg_double(const char *name, const char *s, double lo, double hi)
 {
 	char *end;
+	errno = 0;
 	double v = strtod(s, &end);
-	if (*end || !(v >= lo)) { fprintf(stderr, "%s: bad value %s\n", name, s); exit(2); }
+	if (end == s || *end || errno == ERANGE || !isfinite(v) || v < lo || v > hi) {
+		fprintf(stderr, "%s: bad value '%s'; must be between %g and %g\n", name, s, lo, hi);
+		exit(2);
+	}
 	return v;
+}
+
+static unsigned arg_uint(const char *name, const char *s, unsigned lo, unsigned hi)
+{
+	char *end;
+	errno = 0;
+	if (*s == '-') goto bad;
+	unsigned long long v = strtoull(s, &end, 10);
+	if (end == s || *end || errno == ERANGE || v < lo || v > hi) goto bad;
+	return (unsigned)v;
+bad:
+	fprintf(stderr, "%s: bad value '%s'; must be an integer between %u and %u\n", name, s, lo, hi);
+	exit(2);
 }
 
 int main(int argc, char **argv)
 {
-	enum { OPT_SOCK = 256, OPT_INTERVAL, OPT_UTC, OPT_SETTLE, OPT_BRACKETS, OPT_MAXBR, OPT_TIMEOUT,
-	       OPT_LOG, OPT_OSLOG, OPT_DEBUG };
+	enum { OPT_SOCK = 256, OPT_INTERVAL, OPT_PORT_RETRY, OPT_UTC, OPT_SETTLE, OPT_BRACKETS, OPT_MAXBR, OPT_TIMEOUT,
+	       OPT_LOG, OPT_OSLOG };
 	static const struct option opts[] = {
 		{ "sock", required_argument, NULL, OPT_SOCK }, { "interval", required_argument, NULL, OPT_INTERVAL },
+		{ "port-retry", required_argument, NULL, OPT_PORT_RETRY },
 		{ "utc-offset", required_argument, NULL, OPT_UTC }, { "settle", required_argument, NULL, OPT_SETTLE },
 		{ "brackets", required_argument, NULL, OPT_BRACKETS }, { "max-bracket", required_argument, NULL, OPT_MAXBR },
 		{ "timeout", required_argument, NULL, OPT_TIMEOUT }, { "log", required_argument, NULL, OPT_LOG },
 		{ "json", no_argument, NULL, 'j' }, { "os-log", no_argument, NULL, OPT_OSLOG },
-		{ "debug", no_argument, NULL, OPT_DEBUG }, { "help", no_argument, NULL, 'h' }, { NULL, 0, NULL, 0 }
+		{ "help", no_argument, NULL, 'h' }, { NULL, 0, NULL, 0 }
 	};
 	int c;
 	while ((c = getopt_long(argc, argv, "jh", opts, NULL)) != -1) {
 		switch (c) {
 		case 'j': cfg.json = true; break;
 		case OPT_SOCK: cfg.sock_path = optarg; break;
-		case OPT_INTERVAL: cfg.interval_s = arg_double("--interval", optarg, 0.01); break;
-		case OPT_UTC: cfg.utc_offset = (int)arg_double("--utc-offset", optarg, 0); break;
-		case OPT_SETTLE: cfg.settle_s = arg_double("--settle", optarg, 0); break;
-		case OPT_BRACKETS: cfg.brackets = (unsigned)arg_double("--brackets", optarg, 1); break;
-		case OPT_MAXBR: cfg.max_bracket_us = arg_double("--max-bracket", optarg, 0); break;
-		case OPT_TIMEOUT: cfg.timeout_s = arg_double("--timeout", optarg, 0); break;
+		case OPT_INTERVAL: cfg.interval_s = arg_double("--interval", optarg, 0.01, MAX_INTERVAL_S); break;
+		case OPT_PORT_RETRY: cfg.port_retry_s = arg_double("--port-retry", optarg, 0.1, MAX_PORT_RETRY_S); break;
+		case OPT_UTC: cfg.utc_offset = (int)arg_uint("--utc-offset", optarg, 0, MAX_UTC_OFFSET); break;
+		case OPT_SETTLE: cfg.settle_s = arg_double("--settle", optarg, 0, MAX_SETTLE_S); break;
+		case OPT_BRACKETS: cfg.brackets = arg_uint("--brackets", optarg, 1, MAX_BRACKETS); break;
+		case OPT_MAXBR: cfg.max_bracket_us = arg_double("--max-bracket", optarg, 0, MAX_BRACKET_US); break;
+		case OPT_TIMEOUT: cfg.timeout_s = arg_double("--timeout", optarg, 0, MAX_TIMEOUT_S); break;
 		case OPT_LOG: cfg.log_path = optarg; break;
 		case OPT_OSLOG: cfg.os_log = true; break;
-		case OPT_DEBUG: cfg.debug = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -430,22 +499,37 @@ int main(int argc, char **argv)
 	if (argc - optind != 1) { usage(argv[0]); return 2; }
 	cfg.interface = argv[optind];
 
-	mach_timebase_info(&timebase);
 	start_mach = mach_absolute_time();
+	mach_timebase_info(&timebase);
+	if (cfg.os_log) oslog = os_log_create(OS_LOG_SUBSYSTEM, "gptp-refclock");
 
 	if (cfg.log_path) {
 		log_out = fopen(cfg.log_path, "a");
-		if (!log_out) { fprintf(stderr, "%s: %s\n", cfg.log_path, strerror(errno)); return 1; }
+		if (!log_out) { note("measurement log %s: %s", cfg.log_path, strerror(errno)); return 1; }
 	}
-	if (cfg.os_log) oslog = os_log_create(OS_LOG_SUBSYSTEM, "gptp-refclock");
 	chrony = chrony_client_create(NULL, cfg.sock_path);
-	if (!chrony) { fprintf(stderr, "cannot create the chrony client for %s\n", cfg.sock_path); return 1; }
+	if (!chrony) {
+		note("cannot create the chrony client for %s: %s", cfg.sock_path, strerror(errno));
+		if (log_out) fclose(log_out);
+		return 1;
+	}
 
 	char err[256];
-	ts = gptp_open((uint64_t)(cfg.timeout_s * 1e9), err, sizeof(err));
-	if (!ts) { fprintf(stderr, "%s\n", err); return 1; }
+	ts = gptp_open((uint64_t)llround(cfg.timeout_s * 1e9), err, sizeof(err));
+	if (!ts) {
+		note("%s", err);
+		chrony_client_destroy(chrony);
+		if (log_out) fclose(log_out);
+		return 1;
+	}
 	gptp_set_event_handler(ts, on_event, NULL);
-	if (!gptp_port_add(ts, cfg.interface, err, sizeof(err))) { fprintf(stderr, "%s\n", err); gptp_close(ts); return 1; }
+	if (!gptp_port_add(ts, cfg.interface, err, sizeof(err))) {
+		note("%s", err);
+		gptp_close(ts);
+		chrony_client_destroy(chrony);
+		if (log_out) fclose(log_out);
+		return 1;
+	}
 	{
 		struct gptp_domain_state d; struct gptp_port_state p;
 		gptp_domain_state(ts, &d); gptp_port_state(ts, &p);
@@ -458,15 +542,17 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
-	uint64_t interval = s_to_mach(cfg.interval_s), next = mach_absolute_time();
+	uint64_t interval = seconds_to_mach(cfg.interval_s), next = mach_absolute_time();
 	while (!stop_flag) {
 		take_sample();
-		next += interval;
+		do {
+			next += interval;
+		} while ((int64_t)(next - mach_absolute_time()) <= 0);
 		for (;;) {
 			if (stop_flag) break;
 			int64_t left = (int64_t)(next - mach_absolute_time());
 			if (left <= 0) break;
-			int64_t ns = mach_to_ns(left);
+			int64_t ns = gptp_mach_to_ns(left);
 			if (ns > POLL_SLEEP_NS) ns = POLL_SLEEP_NS;
 			struct timespec rel = { .tv_sec = 0, .tv_nsec = (long)ns };
 			nanosleep(&rel, NULL);

@@ -88,23 +88,21 @@ chrony_client_t *chrony_client_create(const char *local_path_format, const char 
     local_addr.sun_family = AF_UNIX;
     strcpy(local_addr.sun_path, client->local_path);
     
-    if (bind(client->sock_fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
+    /* bind creates the socket with 0660 permissions, without a pathname
+     * operation that could follow a replacement symlink. */
+    mode_t old_umask = umask(0117);
+    int bind_result = bind(client->sock_fd, (struct sockaddr *)&local_addr, sizeof(local_addr));
+    int bind_errno = errno;
+    umask(old_umask);
+    if (bind_result < 0) {
+        errno = bind_errno;
         perror("bind");
         close(client->sock_fd);
         unlink(client->local_path);
         free(client);
         return NULL;
     }
-    
-    /* Set permissions */
-    if (chmod(client->local_path, 0660) < 0) {
-        perror("chmod");
-        close(client->sock_fd);
-        unlink(client->local_path);
-        free(client);
-        return NULL;
-    }
-    
+
     return client;
 }
 

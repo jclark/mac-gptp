@@ -70,6 +70,11 @@ struct gptp_time {
 	bool time_traceable, frequency_traceable;
 };
 
+static inline int64_t gptp_time_to_ns(const struct gptp_time *t)
+{
+	return (int64_t)(t->seconds * UINT64_C(1000000000) + t->nanoseconds);
+}
+
 struct gptp_metrics {
 	uint64_t time_to_lock, gm_changes;
 	uint64_t port_total, port_successful, port_dropped, port_discarded;

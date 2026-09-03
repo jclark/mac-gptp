@@ -49,23 +49,33 @@
 #define DEFAULT_UTC_OFFSET 37		/* TAI - UTC since 2017-01-01 */
 #define DEFAULT_REPORT_S 60.0
 #define DEFAULT_TIMEOUT_S 2.0		/* waiting for the TimeSync daemon */
-#define WINDOW_MARGIN_NS (NS_PER_S / 20)	/* a second closer than window + this is skipped */
-#define IDLE_WAIT_S 0.5			/* between state checks while not locked */
+#define DEFAULT_WINDOW_MARGIN_US 50000.0	/* minimum lead before a polling window */
+#define DEFAULT_STATE_INTERVAL_S 0.5	/* between state checks while not locked */
+#define WAIT_SLICE_NS 100000000		/* bounds signal-response latency while sleeping */
+#define MAX_TIME_S 604800.0
+#define MAX_WINDOW_US 500000.0
+#define MAX_UNCERTAINTY_US 500000.0
+#define MAX_REPORT_S 86400.0
+#define MAX_TIMEOUT_S 60.0
+#define MAX_WINDOW_MARGIN_US 500000.0
+#define MAX_STATE_INTERVAL_S 60.0
+#define MAX_UTC_OFFSET 1000U
 
 static struct config {
 	const char *interface, *device, *log_path;
 	double time_s, window_us, max_uncertainty_us, report_s, timeout_s;
+	double window_margin_us, state_interval_s;
 	int utc_offset;
 	bool json, debug;
 } cfg = {
 	.time_s = DEFAULT_TIME_S, .window_us = DEFAULT_WINDOW_US, .max_uncertainty_us = DEFAULT_MAX_UNCERTAINTY_US,
 	.report_s = DEFAULT_REPORT_S, .timeout_s = DEFAULT_TIMEOUT_S, .utc_offset = DEFAULT_UTC_OFFSET,
+	.window_margin_us = DEFAULT_WINDOW_MARGIN_US, .state_interval_s = DEFAULT_STATE_INTERVAL_S,
 };
 
 static gptp_t *ts;
 static int fd = -1;
 static FILE *log_out;
-static mach_timebase_info_data_t timebase;
 static uint64_t start_mach;
 static volatile sig_atomic_t stop_flag;
 
@@ -74,13 +84,11 @@ static struct {
 	size_t n, cap;
 	unsigned windows, empty, rejected;
 	bool locked, have_state;	/* the last state check */
+	bool port_retry_failing;
 	bool header_done;
 } run;
 
 /* ---- helpers ------------------------------------------------------------ */
-
-static int64_t mach_to_ns(int64_t ticks) { return ticks * timebase.numer / timebase.denom; }
-static uint64_t s_to_mach(double s) { return (uint64_t)llround(s * 1e9 * timebase.denom / timebase.numer); }
 
 static void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void note(const char *fmt, ...)
@@ -112,7 +120,10 @@ static double quantile(const double *v, size_t n, double q)
 	if (!c) return NAN;
 	memcpy(c, v, n * sizeof(*c));
 	qsort(c, n, sizeof(*c), cmp_double);
-	double r = c[(size_t)(q * (double)(n - 1))];
+	double pos = q * (double)(n - 1);
+	size_t lower = (size_t)pos;
+	size_t upper = lower + (lower + 1 < n);
+	double r = c[lower] + (c[upper] - c[lower]) * (pos - (double)lower);
 	free(c);
 	return r;
 }
@@ -141,8 +152,8 @@ static bool wait_until(uint64_t deadline)
 	while (!stop_flag) {
 		int64_t left = (int64_t)(deadline - mach_absolute_time());
 		if (left <= 0) return true;
-		int64_t ns = mach_to_ns(left);
-		if (ns > 100000000) ns = 100000000;
+		int64_t ns = gptp_mach_to_ns(left);
+		if (ns > WAIT_SLICE_NS) ns = WAIT_SLICE_NS;
 		struct timespec rel = { .tv_sec = 0, .tv_nsec = (long)ns };
 		nanosleep(&rel, NULL);
 	}
@@ -184,8 +195,22 @@ static enum poll_result poll_edge(uint64_t open_time, uint64_t close_time, uint6
 static bool domain_locked(void)
 {
 	struct gptp_domain_state d; struct gptp_port_state p; struct gptp_time t;
-	gptp_domain_state(ts, &d);
 	gptp_port_state(ts, &p);
+	if (!p.present) {
+		char err[256];
+		if (!gptp_port_add(ts, cfg.interface, err, sizeof(err))) {
+			if (!run.port_retry_failing) note("%s; will retry", err);
+			run.port_retry_failing = true;
+		} else {
+			note("gPTP port on %s is available again", cfg.interface);
+			run.port_retry_failing = false;
+			gptp_port_state(ts, &p);
+		}
+	} else if (run.port_retry_failing) {
+		note("gPTP port on %s is available again", cfg.interface);
+		run.port_retry_failing = false;
+	}
+	gptp_domain_state(ts, &d);
 	const char *why = NULL;
 	if (!p.present) why = "no gPTP port on the interface";
 	else if (!p.enabled || !p.as_capable) why = "the port has no gPTP peer";
@@ -206,7 +231,7 @@ static bool gptp_ns_at(uint64_t mach, int64_t *ns)
 {
 	struct gptp_time t;
 	if (!gptp_time_from_mach(ts, mach, &t)) return false;
-	*ns = (int64_t)(t.seconds * (uint64_t)NS_PER_S + t.nanoseconds);
+	*ns = gptp_time_to_ns(&t);
 	return true;
 }
 
@@ -275,47 +300,72 @@ static void usage(const char *prog)
 "Mac's gPTP clock on INTERFACE, and print chrony's offset for the CTS refclock line.\n"
 "  -t SECONDS              how long to collect edges (%g); an hour gets about 1.5 us\n"
 "      --window US         poll either side of the predicted second (%g)\n"
+"      --window-margin US  minimum lead before opening a polling window (%g)\n"
 "      --max-uncertainty US  reject an edge whose half bracket exceeds this (%g)\n"
 "      --utc-offset N      TAI minus UTC in seconds (%d)\n"
 "      --report SECONDS    progress on stderr this often (%g)\n"
+"      --state-interval S  seconds between state checks while waiting (%g)\n"
 "      --log PATH          one record per edge: read time (UTC), edge time (TAI), uncertainty\n"
 "  -j, --json              the record file as JSON lines, as satpulsetool sdp -j writes them\n"
 "      --timeout SECONDS   wait this long for the TimeSync daemon (%g)\n"
 "      --debug             a note per edge\n"
 "  -h, --help\n"
 "Output: the median position of the edge after the gPTP second, in seconds, on stdout.\n",
-		prog, DEFAULT_TIME_S, DEFAULT_WINDOW_US, DEFAULT_MAX_UNCERTAINTY_US, DEFAULT_UTC_OFFSET, DEFAULT_REPORT_S, DEFAULT_TIMEOUT_S);
+		prog, DEFAULT_TIME_S, DEFAULT_WINDOW_US, DEFAULT_WINDOW_MARGIN_US, DEFAULT_MAX_UNCERTAINTY_US,
+		DEFAULT_UTC_OFFSET, DEFAULT_REPORT_S, DEFAULT_STATE_INTERVAL_S, DEFAULT_TIMEOUT_S);
 }
 
-static double arg_double(const char *name, const char *s, double lo)
+static double arg_double(const char *name, const char *s, double lo, double hi)
 {
 	char *end;
+	errno = 0;
 	double v = strtod(s, &end);
-	if (*end || !(v >= lo)) { fprintf(stderr, "%s: bad value %s\n", name, s); exit(2); }
+	if (end == s || *end || errno == ERANGE || !isfinite(v) || v < lo || v > hi) {
+		fprintf(stderr, "%s: bad value '%s'; must be between %g and %g\n", name, s, lo, hi);
+		exit(2);
+	}
 	return v;
+}
+
+static unsigned arg_uint(const char *name, const char *s, unsigned lo, unsigned hi)
+{
+	char *end;
+	errno = 0;
+	if (*s == '-') goto bad;
+	unsigned long long v = strtoull(s, &end, 10);
+	if (end == s || *end || errno == ERANGE || v < lo || v > hi) goto bad;
+	return (unsigned)v;
+bad:
+	fprintf(stderr, "%s: bad value '%s'; must be an integer between %u and %u\n", name, s, lo, hi);
+	exit(2);
 }
 
 int main(int argc, char **argv)
 {
-	enum { OPT_WINDOW = 256, OPT_MAXUNC, OPT_UTC, OPT_REPORT, OPT_LOG, OPT_TIMEOUT, OPT_DEBUG };
+	enum { OPT_WINDOW = 256, OPT_WINDOW_MARGIN, OPT_MAXUNC, OPT_UTC, OPT_REPORT, OPT_STATE_INTERVAL,
+	       OPT_LOG, OPT_TIMEOUT, OPT_DEBUG };
 	static const struct option opts[] = {
 		{ "time", required_argument, NULL, 't' }, { "window", required_argument, NULL, OPT_WINDOW },
+		{ "window-margin", required_argument, NULL, OPT_WINDOW_MARGIN },
 		{ "max-uncertainty", required_argument, NULL, OPT_MAXUNC }, { "utc-offset", required_argument, NULL, OPT_UTC },
-		{ "report", required_argument, NULL, OPT_REPORT }, { "log", required_argument, NULL, OPT_LOG }, { "json", no_argument, NULL, 'j' },
+		{ "report", required_argument, NULL, OPT_REPORT }, { "state-interval", required_argument, NULL, OPT_STATE_INTERVAL },
+		{ "log", required_argument, NULL, OPT_LOG }, { "json", no_argument, NULL, 'j' },
 		{ "timeout", required_argument, NULL, OPT_TIMEOUT }, { "debug", no_argument, NULL, OPT_DEBUG },
 		{ "help", no_argument, NULL, 'h' }, { NULL, 0, NULL, 0 }
 	};
 	int c;
 	while ((c = getopt_long(argc, argv, "t:jh", opts, NULL)) != -1) {
 		switch (c) {
-		case 't': cfg.time_s = arg_double("-t", optarg, 1); break;
-		case OPT_WINDOW: cfg.window_us = arg_double("--window", optarg, 1); break;
-		case OPT_MAXUNC: cfg.max_uncertainty_us = arg_double("--max-uncertainty", optarg, 0); break;
-		case OPT_UTC: cfg.utc_offset = (int)arg_double("--utc-offset", optarg, 0); break;
-		case OPT_REPORT: cfg.report_s = arg_double("--report", optarg, 1); break;
+		case 't': cfg.time_s = arg_double("-t", optarg, 1, MAX_TIME_S); break;
+		case OPT_WINDOW: cfg.window_us = arg_double("--window", optarg, 1, MAX_WINDOW_US); break;
+		case OPT_WINDOW_MARGIN: cfg.window_margin_us = arg_double("--window-margin", optarg, 0, MAX_WINDOW_MARGIN_US); break;
+		case OPT_MAXUNC: cfg.max_uncertainty_us = arg_double("--max-uncertainty", optarg, 0, MAX_UNCERTAINTY_US); break;
+		case OPT_UTC: cfg.utc_offset = (int)arg_uint("--utc-offset", optarg, 0, MAX_UTC_OFFSET); break;
+		case OPT_REPORT: cfg.report_s = arg_double("--report", optarg, 1, MAX_REPORT_S); break;
+		case OPT_STATE_INTERVAL: cfg.state_interval_s = arg_double("--state-interval", optarg, 0.01, MAX_STATE_INTERVAL_S); break;
 		case OPT_LOG: cfg.log_path = optarg; break;
 		case 'j': cfg.json = true; break;
-		case OPT_TIMEOUT: cfg.timeout_s = arg_double("--timeout", optarg, 0); break;
+		case OPT_TIMEOUT: cfg.timeout_s = arg_double("--timeout", optarg, 0, MAX_TIMEOUT_S); break;
 		case OPT_DEBUG: cfg.debug = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
@@ -325,8 +375,11 @@ int main(int argc, char **argv)
 	cfg.interface = argv[optind];
 	cfg.device = argv[optind + 1];
 	if (cfg.window_us * 1e3 >= NS_PER_S / 2) { fprintf(stderr, "--window must be under half a second\n"); return 2; }
+	if ((cfg.window_us + cfg.window_margin_us) * 1e3 >= NS_PER_S) {
+		fprintf(stderr, "--window and --window-margin must total less than one second\n");
+		return 2;
+	}
 
-	mach_timebase_info(&timebase);
 	start_mach = mach_absolute_time();
 	if (!open_device()) return 1;
 	if (cfg.log_path) {
@@ -334,7 +387,7 @@ int main(int argc, char **argv)
 		if (!log_out) { fprintf(stderr, "%s: %s\n", cfg.log_path, strerror(errno)); return 1; }
 	}
 	char err[256];
-	ts = gptp_open((uint64_t)(cfg.timeout_s * 1e9), err, sizeof(err));
+	ts = gptp_open((uint64_t)llround(cfg.timeout_s * 1e9), err, sizeof(err));
 	if (!ts) { fprintf(stderr, "%s\n", err); return 1; }
 	if (!gptp_port_add(ts, cfg.interface, err, sizeof(err))) { fprintf(stderr, "%s\n", err); gptp_close(ts); return 1; }
 	note("polling %s against gPTP on %s for %g s: window +/-%g us, UTC offset %d s", cfg.device, cfg.interface, cfg.time_s, cfg.window_us, cfg.utc_offset);
@@ -343,45 +396,63 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 
-	int64_t window_ns = (int64_t)(cfg.window_us * 1e3), utc_off_ns = (int64_t)cfg.utc_offset * NS_PER_S;
-	uint64_t deadline = start_mach + s_to_mach(cfg.time_s), next_report = start_mach + s_to_mach(cfg.report_s);
+	int64_t window_ns = (int64_t)llround(cfg.window_us * 1e3);
+	int64_t window_margin_ns = (int64_t)llround(cfg.window_margin_us * 1e3);
+	int64_t utc_off_ns = (int64_t)cfg.utc_offset * NS_PER_S;
+	uint64_t deadline = start_mach + gptp_ns_to_mach((int64_t)llround(cfg.time_s * NS_PER_S));
+	uint64_t next_report = start_mach + gptp_ns_to_mach((int64_t)llround(cfg.report_s * NS_PER_S));
+	bool failed = false;
 	while (!stop_flag && mach_absolute_time() < deadline) {
-		if (mach_absolute_time() >= next_report) { report("progress"); next_report += s_to_mach(cfg.report_s); }
-		if (!domain_locked()) { wait_until(mach_absolute_time() + s_to_mach(IDLE_WAIT_S)); continue; }
+		if (mach_absolute_time() >= next_report) {
+			report("progress");
+			next_report = mach_absolute_time() + gptp_ns_to_mach((int64_t)llround(cfg.report_s * NS_PER_S));
+		}
+		if (!domain_locked()) {
+			wait_until(mach_absolute_time() + gptp_ns_to_mach((int64_t)llround(cfg.state_interval_s * NS_PER_S)));
+			continue;
+		}
 		/* the next UTC second by gPTP, far enough away for the window to open */
 		int64_t now_ns;
-		if (!gptp_ns_at(mach_absolute_time(), &now_ns)) { wait_until(mach_absolute_time() + s_to_mach(IDLE_WAIT_S)); continue; }
+		if (!gptp_ns_at(mach_absolute_time(), &now_ns)) {
+			wait_until(mach_absolute_time() + gptp_ns_to_mach((int64_t)llround(cfg.state_interval_s * NS_PER_S)));
+			continue;
+		}
 		int64_t utc_ns = now_ns - utc_off_ns;
 		int64_t next_s = utc_ns / NS_PER_S + 1;
-		if (next_s * NS_PER_S - utc_ns < window_ns + WINDOW_MARGIN_NS) next_s++;
+		if (next_s * NS_PER_S - utc_ns < window_ns + window_margin_ns) next_s++;
 		int64_t target = next_s * NS_PER_S + utc_off_ns;		/* the pulse, in domain time */
 		uint64_t open_time = gptp_mach_from_domain(ts, (uint64_t)(target - window_ns));
 		uint64_t close_time = gptp_mach_from_domain(ts, (uint64_t)(target + window_ns));
-		if (close_time > deadline) close_time = deadline;
+		if (close_time > deadline) break;
 		uint64_t edge, bracket; int64_t read_realtime_ns = 0;
 		enum poll_result r = poll_edge(open_time, close_time, &edge, &bracket, &read_realtime_ns);
 		if (r == POLL_STOPPED) break;
-		if (r == POLL_ERROR) { note("ioctl(TIOCMGET) on %s: %s", cfg.device, strerror(errno)); break; }
+		if (r == POLL_ERROR) { note("ioctl(TIOCMGET) on %s: %s", cfg.device, strerror(errno)); failed = true; break; }
 		run.windows++;
 		if (r == POLL_EMPTY) { run.empty++; if (cfg.debug) note("no edge in the window"); continue; }
-		double unc_us = (double)mach_to_ns((int64_t)bracket) / 2 * 1e-3;
+		double unc_us = (double)gptp_mach_to_ns((int64_t)bracket) / 2 * 1e-3;
 		if (unc_us > cfg.max_uncertainty_us) {
 			run.rejected++;
 			if (cfg.debug) note("edge rejected: uncertainty %.1f us", unc_us);
 			continue;
 		}
 		int64_t edge_ns;
-		if (!gptp_ns_at(edge, &edge_ns)) continue;
+		if (!gptp_ns_at(edge, &edge_ns)) {
+			run.rejected++;
+			if (cfg.debug) note("edge rejected: gPTP conversion failed");
+			continue;
+		}
 		double pos_us = (double)(edge_ns - target) * 1e-3;
-		if (!record(pos_us, unc_us)) { note("out of memory"); break; }
+		if (!record(pos_us, unc_us)) { note("out of memory"); failed = true; break; }
 		log_edge(edge_ns, read_realtime_ns, unc_us);
 		if (cfg.debug) note("edge %+.1f us after the gPTP second, uncertainty %.1f us", pos_us, unc_us);
 	}
 
-	report(stop_flag ? "stopped" : "done");
+	report(failed ? "failed" : stop_flag ? "stopped" : "done");
 	gptp_close(ts);
 	close(fd);
 	if (log_out) fclose(log_out);
+	if (failed) return 1;
 	if (!run.n) { fprintf(stderr, "no usable edge: nothing to report\n"); return 1; }
 	printf("%.1e\n", quantile(run.pos_us, run.n, 0.5) * 1e-6);
 	return 0;

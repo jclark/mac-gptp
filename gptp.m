@@ -278,7 +278,8 @@ bool gptp_port_add(gptp_t *g, const char *ifname, char *err, size_t errlen)
 			id __autoreleasing e = nil;
 			if (!SEND(msg_bool_id_pu16_perr, g->domain, "addLinkLayerPortOnInterfaceNamed:allocatedPortNumber:error:", g->ifname, &portnum, &e)) {
 				set_err(err, errlen, "adding a gPTP port on %s: %s", ifname, nserr(e));
-				g->ifname = nil;
+				/* Keep the interface so a state read can find a port that
+				 * reappears before the next add attempt. */
 				return false;
 			}
 			g->added_port = true;
@@ -417,13 +418,13 @@ uint64_t gptp_mach_from_domain(gptp_t *g, uint64_t domain_ns)
 int64_t gptp_mach_to_ns(int64_t ticks)
 {
 	if (!timebase.denom) mach_timebase_info(&timebase);
-	return ticks * timebase.numer / timebase.denom;
+	return (int64_t)((__int128)ticks * timebase.numer / timebase.denom);
 }
 
 uint64_t gptp_ns_to_mach(int64_t ns)
 {
 	if (!timebase.denom) mach_timebase_info(&timebase);
-	return (uint64_t)(ns * timebase.denom / timebase.numer);
+	return (uint64_t)((__int128)ns * timebase.denom / timebase.numer);
 }
 
 /* ---- per-sync updates ------------------------------------------------- */

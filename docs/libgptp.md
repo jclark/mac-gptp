@@ -28,6 +28,7 @@ While the Mac is its own grandmaster, they are nanoseconds since boot.
 The library works in TAI and leaves the UTC offset to the caller, since the framework does not provide a trustworthy value for it.
 Mach times use the ticks returned by `mach_absolute_time`, since this is the unit accepted by the framework.
 `gptp_mach_to_ns` and `gptp_ns_to_mach` convert between ticks and nanoseconds.
+`gptp_time_to_ns` combines the seconds and nanoseconds of a `struct gptp_time`.
 
 ## A session
 

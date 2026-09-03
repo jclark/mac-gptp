@@ -14,6 +14,8 @@ Root privileges are needed only because chrony creates its socket with permissio
 Without root privileges, the program still runs but cannot deliver samples to chrony; it reports this once.
 The program adds a gPTP port on the interface, or uses a port that another process has already added there.
 The kernel removes a port added by the program when the program exits, even if it crashes.
+If the owner of an adopted port exits, the refclock retries until it can add or adopt the port again.
+It waits `--port-retry` seconds between attempts.
 
 Configure chrony like this, with neither the `pps` nor the `offset` option on the refclock line:
 
@@ -43,6 +45,7 @@ Events are written to stderr, each with its UTC date and time.
 At startup, the program reports the port and grandmaster.
 It then reports changes of state, events from the framework, and changes in the availability of chrony.
 A launchd plist can pass `--os-log` to send these events to the unified log instead.
+Each unified-log message contains the UTC time at which the event occurred, which can precede the log entry by up to one sampling interval.
 They use the subsystem `com.jclark.gptp` and the category `gptp-refclock`:
 
     log show --predicate 'subsystem == "com.jclark.gptp"'
@@ -69,6 +72,7 @@ What happens on replugging, on a ptp4l restart at the grandmaster, and on sleep 
 By default, records contain space-separated columns, with their names written on a `#` line when the file is opened.
 With `-j`, each record is a JSON object on one line.
 Without `--log` nothing is recorded.
+If a write fails after the file has been opened, the program reports the error once and continues without measurement logging.
 The code generates both formats from the same table of columns.
 Each record contains:
 
@@ -90,6 +94,7 @@ Comparison with the adapter clock showed that the wander came from the oscillato
 - `INTERFACE`: the interface on which to add the gPTP port.
 - `--sock PATH`: chrony's socket (`/var/run/chrony.gptp.sock`).
 - `--interval S`: seconds between samples (1).
+- `--port-retry S`: seconds between attempts to restore a missing port (1).
 - `--utc-offset N`: TAI minus UTC in seconds (37, correct since 2017).
   The announce carries this value, but the framework does not expose it.
   It must therefore be configured explicitly.
@@ -102,7 +107,6 @@ Comparison with the adapter clock showed that the wander came from the oscillato
 - `--timeout S`: how long to wait for the TimeSync daemon (2).
 - `--log PATH`: the measurement file; `-j` makes it JSON lines.
 - `--os-log`: send events to the unified log instead of stderr.
-- `--debug`: include the raw numbers of the mapping in each record.
 
 ## What the runs showed
 

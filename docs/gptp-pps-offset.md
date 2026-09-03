@@ -23,6 +23,8 @@ The gPTP mapping locates the UTC second to well under a microsecond, and neither
 The program predicts each second from the mapping rather than from the previous pulse.
 It subtracts the UTC offset from the current grandmaster time, rounds up to the next whole second and converts the result back to a mach deadline.
 It then polls the pin in a window extending `--window` (100 ms) either side of that instant.
+The start of a chosen window must be at least `--window-margin` (50 ms) in the future.
+This leaves time to convert the domain-time bounds to mach deadlines and sleep until polling begins.
 A wide polling bracket indicates that the process was preempted, making its midpoint an unreliable timestamp for the pulse.
 The program therefore rejects an edge whose bracket half-width exceeds `--max-uncertainty` (150 us).
 The collection period defaults to 600 seconds and can be changed with `-t`.
@@ -43,15 +45,18 @@ Below a microsecond the result is limited by the mapping's own fixed offset, whi
 
 The program needs no privileges.
 If the refclock is running it uses the refclock's gPTP port; otherwise it adds a port of its own for the duration of the run.
+If the owner of an adopted port exits, the program retries until it can add or adopt the port again.
 While the domain is not locked to an external grandmaster, the program waits and reports why.
 
 ## Options
 
 - `-t SECONDS`: how long to collect edges (600).
 - `--window US`: how far either side of the predicted second to poll (100000).
+- `--window-margin US`: how far in the future the start of a newly chosen polling window must be (50000).
 - `--max-uncertainty US`: reject an edge whose bracket half-width exceeds this (150).
 - `--utc-offset N`: TAI minus UTC (37), needed to locate the UTC second in gPTP time.
 - `--report SECONDS`: interval between progress lines on stderr (60).
+- `--state-interval S`: interval between state checks while the port or domain is not ready (0.5).
 - `--log PATH`: write a record for each edge.
   With `-j`, each record uses the same JSON format as a timestamp event from `satpulsetool sdp -j`.
   `timestamp` gives the edge time on the gPTP clock as TAI seconds and nanoseconds, while `tRead` gives the system time of the read that detected it.
