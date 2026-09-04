@@ -29,7 +29,7 @@ The following configuration gave the best result in these tests:
     makestep 0.001 3
 
 chrony creates the socket at startup, so restart it after adding the refclock line.
-Mark any NTP servers in the configuration as `noselect`.
+If you want to ensure that the accuracy comes entirely from the gPTP refclock, mark any NTP servers in the configuration as `noselect`.
 They will remain visible for comparison but will not steer the clock.
 
 These settings are needed because the Mac's oscillator wanders by several hundred ppb over a few minutes.
@@ -111,8 +111,10 @@ Comparison with the adapter clock showed that the wander came from the oscillato
   The sample is recorded but not sent.
   Mach time ticks at 24 MHz on Apple silicon, so a bracket reads as either 0 or 41 ns.
 - `--timeout S`: how long to wait for the TimeSync daemon (2).
-- `--log PATH`: the measurement file; `-j` makes it JSON lines.
+- `--log PATH`: the measurement file.
+- `-j, --json`: write the measurement file as JSON lines instead of space-separated columns.
 - `--os-log`: send events to the unified log instead of stderr.
+- `-h, --help`: print command-line help.
 
 ## What the runs showed
 

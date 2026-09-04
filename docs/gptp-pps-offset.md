@@ -69,7 +69,7 @@ While the domain is not locked to an external grandmaster, the program waits and
 `DEVICE` names the serial device whose CTS pin carries the GPS PPS signal.
 `OPTION` can be any of the following:
 
-- `-t SECONDS`: how long to collect edges (600).
+- `-t, --time SECONDS`: how long to collect edges (600).
 - `--window US`: how far either side of the predicted second to poll (100000).
 - `--window-margin US`: how far in the future the start of a newly chosen polling window must be (50000).
 - `--max-uncertainty US`: reject an edge whose bracket half-width exceeds this (150).
@@ -77,13 +77,15 @@ While the domain is not locked to an external grandmaster, the program waits and
 - `--report SECONDS`: interval between progress lines on stderr (60).
 - `--state-interval S`: interval between state checks while the port or domain is not ready (0.5).
 - `--log PATH`: write a record for each edge.
-  With `-j`, each record uses the same JSON format as a timestamp event from `satpulsetool sdp -j`.
+- `-j, --json`: write the record file as JSON lines instead of space-separated columns.
+  Each record uses the same JSON format as a timestamp event from `satpulsetool sdp -j`.
   `timestamp` gives the edge time on the gPTP clock as TAI seconds and nanoseconds, while `tRead` gives the system time of the read that detected it.
   The `uncertainty` field gives the bracket half-width in seconds, as it does for edges from SatPulse's serial mode.
   The fractional part of `timestamp` is the position of the edge after the second.
   Without `-j`, the same fields are written as space-separated columns, with the date and time of the read in UTC first, under a `#` line giving the column names.
 - `--timeout SECONDS`: how long to wait for the TimeSync daemon (2).
 - `--debug`: write a line for each edge to stderr.
+- `-h, --help`: print command-line help.
 
 ## What it found
 
