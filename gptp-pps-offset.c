@@ -1,18 +1,18 @@
 /* SPDX-License-Identifier: MIT */
-/* gptp-pps-offset: measure the latency of the serial PPS polling path
+/* gptp-pps-offset: estimate the bias in timestamps from the serial PPS polling path
  * against the Mac's gPTP clock, and print the value for chrony's "offset"
- * option on the CTS refclock line.
+ * option on the SatPulse CTS refclock line.
  *
- * The GPS pulse deasserts the CTS pin of a serial port.  satpulse's serial
+ * The GPS pulse deasserts the CTS pin of a serial port.  SatPulse's serial
  * mode finds it by polling ioctl(TIOCMGET) and places the edge midway
  * between the last poll that saw the pin asserted and the first that saw it
  * clear; the edge is therefore seen late by the path from the pin through
- * the USB adapter to the poll, and chrony's "offset" is where that latency
- * is declared.  This program polls the same way, but timestamps the edge in
+ * the USB adapter to the poll, and chrony's "offset" corrects that bias.
+ * This program polls the same way, but timestamps the edge in
  * mach absolute time and converts it through the kernel's gPTP mapping,
- * which knows where the UTC second is to well under a microsecond.  The
+ * which locates the UTC second to well under a microsecond.  The
  * edge's position after the gPTP second, median of every edge in the run,
- * is the latency, and it goes to stdout in seconds.
+ * estimates the bias and goes to stdout in seconds.
  *
  * Each edge is only known to half its polling bracket, about 45 us on a
  * quiet Mac, so the run length sets the precision: about 3 us after ten
@@ -296,8 +296,8 @@ static void usage(const char *prog)
 {
 	fprintf(stderr,
 "Usage: %s [options] INTERFACE DEVICE\n"
-"Measure how late the GPS pulse on DEVICE's CTS pin is seen by polling, against the\n"
-"Mac's gPTP clock on INTERFACE, and print chrony's offset for the CTS refclock line.\n"
+"Estimate the bias in GPS PPS timestamps made by polling DEVICE's CTS pin, against the\n"
+"Mac's gPTP clock on INTERFACE, and print chrony's offset for the SatPulse CTS refclock line.\n"
 "  -t SECONDS              how long to collect edges (%g); an hour gets about 1.5 us\n"
 "      --window US         poll either side of the predicted second (%g)\n"
 "      --window-margin US  minimum lead before opening a polling window (%g)\n"

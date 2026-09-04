@@ -1,30 +1,39 @@
 # gptp-pps-offset
 
-    gptp-pps-offset -t 3600 en14 /dev/cu.usbserial-3110
+gptp-pps-offset compares the Mac's gPTP time with the PPS output of a GPS module received on the CTS pin of a USB serial adapter.
+The comparison has two uses.
 
-gptp-pps-offset uses the Mac's gPTP clock to measure the latency of detecting a GPS pulse by polling a serial port's CTS pin.
-It prints the value to use for chrony's `offset` option on the line for that refclock.
+First, it is a sanity check on gPTP.
+A stable PPS edge close to a gPTP second shows that the Mac's mapping from mach time to grandmaster time is behaving plausibly.
 
-## The serial PPS path
+Second, if Apple's gPTP implementation is trusted, the comparison estimates the bias in PPS timestamps made by polling the serial adapter.
+The program prints a value suitable for chrony's `offset` option when the same adapter is used in the [SatPulse serial PPS setup for chrony](https://satpulse.net/setup/ntp.html).
+
+## Hardware
+
+The Mac's gPTP interface and path to the grandmaster must meet the [gPTP hardware requirements](../README.md#hardware-requirements).
+The measurement needs a GPS module with a PPS output and a USB serial adapter based on an FTDI chip.
+The adapter must expose its RTS and CTS handshake pins as well as VCC and GND.
+The GPS module and adapter are joined by three wires: VCC to VCC, GND to GND and the PPS output to CTS.
+
+## Why the offset is needed
 
 Connecting the pulse-per-second output of a GPS receiver to the CTS pin of a USB serial adapter lets software timestamp the pulse on a system without kernel PPS support.
-The software polls `ioctl(TIOCMGET)` repeatedly around the expected time of the second.
+On macOS, SatPulse detects this signal by polling `ioctl(TIOCMGET)` repeatedly around the expected time of the second.
 It timestamps the edge midway between the last poll that saw the pin asserted and the first that saw it clear.
-SatPulse's serial mode uses this method.
-The timestamp is late by the combined delays from sampling the pin in the adapter, transferring its state over USB and returning from the system call.
-chrony compensates for this fixed latency with the `offset` option on the refclock line.
-Before this measurement, the latency on my Mac was assumed to be 20 us.
+Sampling the pin in the adapter, transferring its state over USB and returning from the system call bias the timestamp later than the electrical edge.
+chrony compensates for this measurement bias with the `offset` option on the refclock line.
 
 ## What the program does
 
-gptp-pps-offset uses the same polling method and takes the same exclusive lock on the port.
-It timestamps each edge in mach absolute time and converts the timestamp through the kernel's gPTP mapping.
-The gPTP mapping locates the UTC second to well under a microsecond, and neither chrony nor the system clock plays any part in the measurement.
-The program predicts each second from the mapping rather than from the previous pulse.
+gptp-pps-offset takes an exclusive lock on the serial device and uses the same polling method as SatPulse.
+Neither chrony nor the system clock plays any part in the measurement.
+The program predicts each UTC second from the gPTP mapping rather than from the previous pulse.
 It subtracts the UTC offset from the current grandmaster time, rounds up to the next whole second and converts the result back to a mach deadline.
 It then polls the pin in a window extending `--window` (100 ms) either side of that instant.
 The start of a chosen window must be at least `--window-margin` (50 ms) in the future.
 This leaves time to convert the domain-time bounds to mach deadlines and sleep until polling begins.
+The program timestamps an edge in mach absolute time at the midpoint between the last asserted reading and the first clear reading, then converts that timestamp through the gPTP mapping.
 A wide polling bracket indicates that the process was preempted, making its midpoint an unreliable timestamp for the pulse.
 The program therefore rejects an edge whose bracket half-width exceeds `--max-uncertainty` (150 us).
 The collection period defaults to 600 seconds and can be changed with `-t`.
@@ -33,22 +42,32 @@ It writes the count, quartiles, minimum and median uncertainty to stderr, with a
 `--log PATH` writes one record for each edge.
 
 The result has the sign expected by chrony.
-A late pulse makes the refclock samples too negative by the amount of the latency.
+A positive bias in the detected edge time makes the refclock samples too negative by the same amount.
 Since chrony adds `offset` to each sample, the printed value can be used directly.
 
 ## Precision
 
 Polling locates each edge to within half the width of its bracket, about 45 us on a quiet Mac.
 The median has a precision of about 3 us after ten minutes and about 1.5 us after an hour.
-The delay is one-sided, so the median represents the typical latency and the minimum represents its lower bound.
+The delays in the serial path are one-sided, so the median estimates the typical measurement bias and the minimum gives a lower bound.
 Below a microsecond the result is limited by the mapping's own fixed offset, which nothing on the Mac can measure.
 
+## Running
+
+    gptp-pps-offset en14 /dev/cu.usbserial-3110
+
 The program needs no privileges.
-If the refclock is running it uses the refclock's gPTP port; otherwise it adds a port of its own for the duration of the run.
+If [gptp-refclock](gptp-refclock.md) is running, the program uses its gPTP port; otherwise it adds a port of its own for the duration of the run.
 If the owner of an adopted port exits, the program retries until it can add or adopt the port again.
 While the domain is not locked to an external grandmaster, the program waits and reports why.
 
-## Options
+## Command line
+
+    gptp-pps-offset [OPTION]... INTERFACE DEVICE
+
+`INTERFACE` names the interface used for gPTP.
+`DEVICE` names the serial device whose CTS pin carries the GPS PPS signal.
+`OPTION` can be any of the following:
 
 - `-t SECONDS`: how long to collect edges (600).
 - `--window US`: how far either side of the predicted second to poll (100000).
@@ -68,6 +87,4 @@ While the domain is not locked to an external grandmaster, the program waits and
 
 ## What it found
 
-The same measurement was originally part of the refclock.
-On a Mac mini M4 with an FT232H, a 26-minute run gave five-minute medians between +0.7 and +12.8 us, with a mean of about +7 us.
-The measured latency is about a third of the 20 us previously assumed.
+On a Mac mini M4 with an FT232H, the five-minute median estimates in a 26-minute run ranged from +0.7 to +12.8 us and averaged about +7 us.

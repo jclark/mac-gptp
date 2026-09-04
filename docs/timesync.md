@@ -5,7 +5,7 @@ The framework is private and undocumented.
 This description is based on inspection of its classes with the Objective-C runtime and experiments on a Mac mini M4 running macOS 15.7.7 with TimeSync 1340.13.
 The classes and selectors used by the library remain available on the same Mac running macOS Tahoe 26.6.2 with TimeSync 1460.2.
 `tsdump` was used to list the methods of each class and their type encodings.
-`gptp.h` exposes the parts of the framework used by this repository as a C interface.
+[libgptp](libgptp.md) exposes the parts of the framework used by this repository as a C interface.
 
 ## The objects
 
@@ -14,6 +14,7 @@ The hierarchy begins with IOTimeSyncClockManager, whose children are the mach tr
 IOTimeSyncgPTPManager has one IOTimeSyncDomain, containing a local clock port and one Ethernet port for each interface participating in gPTP.
 IOTimeSyncClockManager also has one kernel clock for each AVB-capable adapter.
 `avbdiagnose --no-coreaudio --no-info-tree` prints this hierarchy together with the properties of each object, the announce fields and the packet counters.
+It also shows whether a port added by these programs has appeared.
 
 Each framework class is a user-space proxy for one kind of kernel object.
 The corresponding classes are `TSClockManager`, `TSgPTPManager`, `TSgPTPClock` for the domain, `TSgPTPEthernetPort` for a port, and `TSKernelClock` for an adapter clock.
@@ -35,8 +36,6 @@ Every conversion that the framework offers is an evaluation of this mapping.
 
 ## What was found
 
-- Delivering samples to chrony's SOCK socket requires root, because chrony creates the socket with permissions that allow only root to write to it.
-  Nothing else here needs any privilege.
 - Adding a link-layer gPTP port with `addLinkLayerPortOnInterfaceNamed:allocatedPortNumber:error:` needs no privilege.
   The port reports `localTimestampingMode` 1, meaning hardware, and a propagation delay limit of 1000 ns.
   The kernel removes the port when the process that added it exits, so a crashed run leaves nothing behind.
@@ -52,7 +51,6 @@ Every conversion that the framework offers is an evaluation of this mapping.
 - `getMachAbsoluteRateRatioNumerator:denominator:machAnchor:andDomainAnchor:withError:` returns the affine mapping.
   When the Mac is its own grandmaster the ratio is exactly the mach timebase, and the anchors move once a second.
   Conversions take mach ticks, not nanoseconds.
-  The mapping is continuous in phase: each new anchor lies on the previous line.
 - `gPTPTimeFromMachAbsoluteTime:` reports `isPTPTimescale` as YES even when the Mac is its own grandmaster.
   Programs must also check that the grandmaster identity differs from the Mac's own before treating the domain as externally synchronized.
 - The `lockState` of the domain is 2 when it is locked, whether to itself or to an external grandmaster.
@@ -79,5 +77,3 @@ Every conversion that the framework offers is an evaluation of this mapping.
   The delivered pairs agree with the mapping to about 20 ns and are smooth to a few nanoseconds.
   They are therefore the output of the servo at each sync rather than raw timestamps.
   The raw sync timestamps are not accessible from user space.
-- `avbdiagnose --no-coreaudio --no-info-tree` prints the kernel's view of the domain and its ports, with the announce fields and packet counters.
-  Use it to check that a port added by these programs has appeared.

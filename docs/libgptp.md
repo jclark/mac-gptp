@@ -128,7 +128,6 @@ Comparing the adapter-clock and domain mappings against mach time made it possib
 ## Names
 
 `gptp_framework_version` returns the bundle version of the framework.
-The version on the machine used to write the library was `1340.13`.
 `gptp_lock_state_name` returns "locked" for 2 and the number as a string otherwise, since 2 is the only value whose meaning is known.
 
 ## What it does not do
@@ -136,7 +135,6 @@ The version on the machine used to write the library was `1340.13`.
 The library does not send anything to chrony or steer any clock.
 The programs perform those tasks.
 The announce carries the UTC offset and leap flags, but the framework does not expose them to the library.
-It cannot reach the raw sync timestamps or the parameters of the kernel's servo.
-The library was written against TimeSync 1340.13 on macOS 15.7.7 and works without code changes with TimeSync 1460.2 on macOS Tahoe 26.6.2.
+The library cannot inspect the parameters of the kernel's servo.
 A later release may still need a repair in `gptp.m`.
-What was found about the framework is recorded in [The TimeSync framework, as observed](timesync.md).
+The tested framework versions and the observations behind the library are recorded in [The TimeSync framework, as observed](timesync.md).

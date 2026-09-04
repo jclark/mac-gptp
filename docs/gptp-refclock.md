@@ -8,6 +8,8 @@ chrony uses these samples to steer the system clock towards the grandmaster.
 
 ## Running
 
+The interface and path to the grandmaster must meet the [hardware requirements](../README.md#hardware-requirements).
+
     sudo gptp-refclock en14
 
 Root privileges are needed only because chrony creates its socket with permissions that allow only root to write to it.
@@ -77,7 +79,7 @@ The code generates both formats from the same table of columns.
 Each record contains:
 
 - the mach time of the sample, the width of its bracket, the system time and the grandmaster time, and their difference `offset_ns`, which is gPTP-derived UTC minus the system clock;
-- the state, the lock state, the Mac's identity and the grandmaster's, the timescale and traceability flags reported by the conversion, and whether the sample was sent;
+- the state, the lock state, the Mac's clock identity and the grandmaster identity, the timescale and traceability flags reported by the conversion, and whether the sample was sent;
 - for the port: asCapable, role, the peer, the propagation delay and its extremes, and the timestamping modes;
 - for the mapping: the rate ratio, both as a fraction and as `rate_ppb` relative to the mach timebase, and the two anchors;
 - counts: syncs seen since the previous record, grandmaster changes, and the port's measurement counters.
@@ -89,9 +91,13 @@ Changes in `rate_ppb` between records show the oscillator's frequency wander.
 The residual phase after fitting the anchors to a straight line shows how that wander develops over time.
 Comparison with the adapter clock showed that the wander came from the oscillator rather than the kernel's servo.
 
-## Options
+## Command line
 
-- `INTERFACE`: the interface on which to add the gPTP port.
+    gptp-refclock [OPTION]... INTERFACE
+
+`INTERFACE` names the interface on which to add the gPTP port.
+`OPTION` can be any of the following:
+
 - `--sock PATH`: chrony's socket (`/var/run/chrony.gptp.sock`).
 - `--interval S`: seconds between samples (1).
 - `--port-retry S`: seconds between attempts to restore a missing port (1).
@@ -110,9 +116,7 @@ Comparison with the adapter clock showed that the wander came from the oscillato
 
 ## What the runs showed
 
-The tests used a Linux boundary clock with a direct gigabit link to the Mac and a direct 2.5-gigabit link to the grandmaster.
-The grandmaster's port clock was held within 10 ns of GPS-derived time.
-The hardware, network and PTP configuration is recorded in the [test setup](test-setup.md).
+The [test setup](test-setup.md) used a grandmaster whose port clock was held within 10 ns of GPS-derived time.
 The refclock also runs without code changes on macOS Tahoe 26.6.2 with TimeSync 1460.2.
 
 - The measured propagation delay was 40 to 42 ns, with a raw spread of 10 ns.
@@ -123,5 +127,5 @@ The refclock also runs without code changes on macOS Tahoe 26.6.2 with TimeSync 
   The matching shapes identify the Mac's oscillator as the source of the wander.
   Its frequency changes by several hundred ppb over a few minutes, and the mapping tracks the change.
 - A GPS pulse detected by polling a serial port's CTS pin stayed a steady few microseconds after the gPTP second, within the resolution of the polling method.
-  [gptp-pps-offset](gptp-pps-offset.md) measures this offset.
+  [gptp-pps-offset](gptp-pps-offset.md) estimates this measurement bias.
 - Before the switch to gPTP, the system clock was 2 ms fast while synchronized by NTP over the internet.

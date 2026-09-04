@@ -160,8 +160,6 @@ The enabled `phc2sys@eth1` service then drives the `eth1` PHC from the system cl
 
 `ptp4l` sends gPTP from that PHC through its server-only `eth1` port to the Mac.
 The transfer deliberately goes from the `eth3` PHC through the system clock to the `eth1` PHC, because PHC-to-system comparisons can use the I226 ports' precise cross timestamps.
-During inspection, the `eth3` input reported a peer delay of about 8 to 10 ns and a summary RMS of 2 to 4 ns.
-`phc2sys` held the `eth1` PHC within about 10 ns of the system clock, while chrony selected the PTP refclock with a source standard deviation of 18 ns.
 
 NetworkManager marks the `eth1` timing connection as `never-default`.
 `dnsmasq` listens only on `eth1` and leases `192.168.101.2/30` to the Mac without router or DNS options.
@@ -189,12 +187,3 @@ makestep 0.001 3
 ```
 sudo gptp-refclock --interval 0.25 en14
 ```
-
-The program's default interval remains one second.
-The shorter interval was a separate test tweak that kept a fresher sample available for chrony's two-second poll.
-
-TimeSync locked through the boundary clock on `edam.lan` to the grandmaster on `abondance.lan`.
-The Mac measured a peer delay of 40 to 42 ns on the direct `en14` to `eth1` link, with raw values from 36 to 46 ns.
-It received eight Sync messages per second and one Announce message per second, matching the intervals configured on the Linux machines.
-With the chrony configuration above, the system clock's residual against the gPTP-derived time was 0.6 us RMS over about half an hour, with excursions of about 2 us.
-The complete chain continued to work after `mimolette` was upgraded from macOS 15.7.7 to macOS Tahoe 26.6.2.
