@@ -7,29 +7,42 @@ gPTP does not synchronize the Mac's system clock.
 Apple exposes the gPTP clock through TimeSync, a private framework with no public documentation.
 This repository contains a C library for using TimeSync and two programs built on the library.
 
-## What macOS needs
+![ChronyControl showing GPTP as chrony's selected source with a sub-microsecond RMS offset](docs/ChronyControl-GPTP.png)
 
-The Ethernet adapter must support AVB, since macOS enables gPTP only on AVB adapters.
-`system_profiler SPEthernetDataType` shows "AVB Support: Yes" for an adapter that qualifies.
-The built-in Ethernet port of a Mac mini qualifies, as does the Apple Thunderbolt to Gigabit Ethernet adapter.
+## Hardware requirements
 
-The path from the adapter to the grandmaster must have a small enough peer delay.
-802.1AS measures the delay to the neighbour on each link and rejects links over a fixed limit.
-On my Mac, this limit is 1000 ns.
-An ordinary switch exceeds this limit.
-A switch with 802.1AS support is the most convenient solution, but these are not cheap.
-A direct cable is the cheapest solution,
-but this requires a more complex network setup where at least one of the computers has multiple network connections.
+On the Mac, the Ethernet interface must support AVB, since macOS enables gPTP only on an AVB interface.
+`system_profiler SPEthernetDataType` reports `AVB Support: Yes` for a suitable interface.
+The built-in Ethernet port on a desktop Mac is the simplest way to get this support.
+A Mac without a suitable built-in port needs a real Thunderbolt Ethernet adapter; an ordinary USB-C Ethernet adapter will not work.
+The cheapest Thunderbolt option is usually a used Apple Thunderbolt to Gigabit Ethernet Adapter connected through an Apple Thunderbolt 3 (USB-C) to Thunderbolt 2 Adapter.
+This is the combination used for the tests here.
 
-The grandmaster must speak 802.1AS.
-For example, ptp4l can act as the grandmaster when configured using the gPTP profile.
-gPTP works at layer 2, so the link needs no IP configuration.
-The Mac's port can carry whatever address the other side assigns it, or none at all.
+The PTP grandmaster must speak the IEEE 802.1AS profile.
+Linuxptp's `ptp4l` can provide such a grandmaster using its supplied [`gPTP.cfg` profile](https://www.linuxptp.org/documentation/configs/gptp/).
+[Precision timing with a PHC](https://satpulse.net/setup/phc.html) explains how to synchronize a Linux PHC from GNSS and run `ptp4l` as a grandmaster.
+Use the gPTP profile for `ptp4l` in that setup when the client is a Mac.
+
+Separately, each link on the path between the grandmaster and the Mac must pass the 802.1AS peer-delay check.
+The TimeSync port used here reports a fixed upper limit of 1000 ns and does not become `asCapable` when the measured delay exceeds it.
+The Mac can connect directly to the grandmaster, or the path can use an AVB switch or another switch with explicit 802.1AS support.
+I have not tested either kind of switch.
+AVB switches are a purpose-built but expensive option.
+An ordinary Ethernet switch will not work because it does not participate in the peer-delay exchange.
+
+The tested general-purpose alternative uses a multiport Linux mini-PC running `ptp4l` as a boundary clock, with direct cables from the boundary clock to the grandmaster and the Mac.
+Good performance from this arrangement requires PTP hardware timestamping on each port and working PCIe Precision Time Measurement (PTM), so that Linux can cross-timestamp each port's PTP hardware clock against the system clock accurately.
+Run `phc_ctl eth1` and check that it reports `has cross timestamping support` to verify that PTM is working for a port.
+[Checking for PTM support](https://satpulse.net/hardware/ptm.html) explains this test.
+PTM does not work on processors before Intel's 12th generation.
+For a mini-PC, an N5105 or later processor with Intel I226 ports is a good rule of thumb.
+The [test setup](docs/test-setup.md) describes the working N5105 boundary clock and the complete three-machine configuration.
 
 ## What it gives
 
 The accuracy of the virtual clock depends on the setup.
-My test used a direct gigabit cable from the Thunderbolt adapter to a grandmaster whose port clock was held within 10 ns of GPS-derived time.
+My test used a Linux boundary clock with a direct gigabit link to the Mac and a direct 2.5-gigabit link to the grandmaster.
+The grandmaster's port clock was held within 10 ns of GPS-derived time.
 Samples of the mapping taken a few seconds apart agreed to about 250 ns.
 A GPS pulse checked against the mapping stayed steady within the few microseconds that the checking method can resolve.
 I would trust the mapping to about a microsecond in absolute terms.
@@ -72,10 +85,10 @@ The library loads the private framework at run time.
 ## Caveats
 
 The framework is private and undocumented.
-Everything here was verified on a single Mac mini M4 running macOS 15.7.7 with TimeSync 1340.13.
+Everything here was first verified on a single Mac mini M4 running macOS 15.7.7 with TimeSync 1340.13.
+The refclock continues to work without code changes on the same Mac running macOS Tahoe 26.6.2 with TimeSync 1460.2.
 If another macOS release renames a class or selector, the library fails at start-up and names the missing class or selector.
 `tsdump` then shows what the class provides in that release.
-The programs need no entitlement.
 The refclock has to run as root only because chrony creates its socket with permissions that allow only root to write to it.
 
 ## Files
@@ -84,4 +97,4 @@ The refclock has to run as root only because chrony creates its socket with perm
 - `gptp-refclock.c`, `chrony-client.c`, `chrony-client.h`: the refclock and the chrony SOCK client.
 - `gptp-pps-offset.c`: the PPS path measurement.
 - `tsdump.m`: the class lister.
-- `docs/`: [libgptp](docs/libgptp.md), [the TimeSync framework as observed](docs/timesync.md), [gptp-refclock](docs/gptp-refclock.md) and [gptp-pps-offset](docs/gptp-pps-offset.md).
+- `docs/`: [libgptp](docs/libgptp.md), [the TimeSync framework as observed](docs/timesync.md), [gptp-refclock](docs/gptp-refclock.md), [gptp-pps-offset](docs/gptp-pps-offset.md) and the [test setup](docs/test-setup.md).

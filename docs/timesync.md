@@ -3,6 +3,7 @@
 `/System/Library/PrivateFrameworks/TimeSync.framework` is the user-space interface to IOTimeSyncFamily, the kernel's IEEE 802.1AS (gPTP) implementation.
 The framework is private and undocumented.
 This description is based on inspection of its classes with the Objective-C runtime and experiments on a Mac mini M4 running macOS 15.7.7 with TimeSync 1340.13.
+The classes and selectors used by the library remain available on the same Mac running macOS Tahoe 26.6.2 with TimeSync 1460.2.
 `tsdump` was used to list the methods of each class and their type encodings.
 `gptp.h` exposes the parts of the framework used by this repository as a C interface.
 

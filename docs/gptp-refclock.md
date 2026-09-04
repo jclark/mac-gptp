@@ -17,7 +17,8 @@ The kernel removes a port added by the program when the program exits, even if i
 If the owner of an adopted port exits, the refclock retries until it can add or adopt the port again.
 It waits `--port-retry` seconds between attempts.
 
-Configure chrony like this, with neither the `pps` nor the `offset` option on the refclock line:
+Tuning chrony for the best results is subtle.
+The following configuration gave the best result in these tests:
 
     refclock SOCK /var/run/chrony.gptp.sock refid GPTP poll 1 filter 1 precision 3e-7 minsamples 8 maxsamples 12 prefer
     corrtimeratio 8
@@ -25,7 +26,6 @@ Configure chrony like this, with neither the `pps` nor the `offset` option on th
     maxslewrate 5
     makestep 0.001 3
 
-Run the refclock with `--interval 0.25` to send four samples a second.
 chrony creates the socket at startup, so restart it after adding the refclock line.
 Mark any NTP servers in the configuration as `noselect`.
 They will remain visible for comparison but will not steer the clock.
@@ -33,11 +33,12 @@ They will remain visible for comparison but will not steer the clock.
 These settings are needed because the Mac's oscillator wanders by several hundred ppb over a few minutes.
 `minsamples` and `maxsamples` limit chrony's frequency regression to a span of 14 to 22 s, which is short enough to follow the wander rather than lag behind it by microseconds.
 `corrtimeratio 8` gives the phase correction a timescale of 16 s.
-`filter 1` uses just one sample per poll, since four readings of the same kernel mapping are not four independent measurements.
+`filter 1` keeps only the newest sample received during each two-second poll, since faster readings of the same kernel mapping are not independent measurements.
+Running the refclock with `--interval 0.25` is a separate tweak that sends four samples a second, giving chrony a fresher sample when each poll runs.
 `maxupdateskew` prevents chrony from applying a frequency estimate that is too uncertain.
 With chrony's default settings and `poll 3`, the residual was 1.7 us RMS, and chrony lagged the wander by up to 5 us.
 With the default settings and `poll 0`, the loop oscillated with a growing swing.
-With the settings above, the residual over half an hour was 0.6 us RMS, with excursions of about 2 us during the fastest wander.
+With the settings above and `--interval 0.25`, the residual over half an hour was 0.6 us RMS, with excursions of about 2 us during the fastest wander.
 
 ## What it reports
 
@@ -64,7 +65,6 @@ The state is determined by a sequence of checks, and the first check that fails 
 A loss of lock, grandmaster change, clock reset or timeout moves the state back and restarts the settling period.
 Unplugging the cable takes the port out of the asCapable state and returns the domain to the Mac's own clock.
 The refclock then stops sending samples.
-What happens on replugging, on a ptp4l restart at the grandmaster, and on sleep has not yet been tested.
 
 ## The measurement file
 
@@ -110,7 +110,10 @@ Comparison with the adapter clock showed that the wander came from the oscillato
 
 ## What the runs showed
 
-The tests used a direct gigabit cable to a grandmaster whose port clock was held within 10 ns of GPS-derived time.
+The tests used a Linux boundary clock with a direct gigabit link to the Mac and a direct 2.5-gigabit link to the grandmaster.
+The grandmaster's port clock was held within 10 ns of GPS-derived time.
+The hardware, network and PTP configuration is recorded in the [test setup](test-setup.md).
+The refclock also runs without code changes on macOS Tahoe 26.6.2 with TimeSync 1460.2.
 
 - The measured propagation delay was 40 to 42 ns, with a raw spread of 10 ns.
   The 10 ns spread is consistent with hardware timestamps accurate to a few nanoseconds.

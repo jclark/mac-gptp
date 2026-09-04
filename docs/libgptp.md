@@ -137,5 +137,6 @@ The library does not send anything to chrony or steer any clock.
 The programs perform those tasks.
 The announce carries the UTC offset and leap flags, but the framework does not expose them to the library.
 It cannot reach the raw sync timestamps or the parameters of the kernel's servo.
-It was written against TimeSync 1340.13 on macOS 15.7.7 and may need repair for another release.
+The library was written against TimeSync 1340.13 on macOS 15.7.7 and works without code changes with TimeSync 1460.2 on macOS Tahoe 26.6.2.
+A later release may still need a repair in `gptp.m`.
 What was found about the framework is recorded in [The TimeSync framework, as observed](timesync.md).
