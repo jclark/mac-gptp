@@ -6,6 +6,7 @@ When a Mac with an AVB-capable Ethernet adapter is connected to a gPTP grandmast
 gPTP does not synchronize the Mac's system clock.
 Apple exposes the gPTP clock through TimeSync, a private framework with no public documentation.
 This repository contains a C library for using TimeSync and two programs built on the library.
+`gptp-refclock` uses the gPTP clock to provide timing information to chrony.
 
 ![ChronyControl showing GPTP as chrony's selected source with a sub-microsecond RMS offset](docs/ChronyControl-GPTP.png)
 
@@ -19,9 +20,9 @@ The cheapest Thunderbolt option is usually a used Apple Thunderbolt to Gigabit E
 This is the combination used for the tests here.
 
 The PTP grandmaster must speak the IEEE 802.1AS profile.
-Linuxptp's `ptp4l` can provide such a grandmaster using its supplied [`gPTP.cfg` profile](https://www.linuxptp.org/documentation/configs/gptp/).
-[Precision timing with a PHC](https://satpulse.net/setup/phc.html) explains how to synchronize a Linux PHC from GNSS and run `ptp4l` as a grandmaster.
-Use the gPTP profile for `ptp4l` in that setup when the client is a Mac.
+A suitable Linux grandmaster can use a GPS module and [SatPulse](https://satpulse.net/) to synchronize an Ethernet port's PTP hardware clock.
+`ptp4l` from [linuxptp](https://www.linuxptp.org/) serves time from that clock.
+Configure `ptp4l` with the supplied `gPTP.cfg` so that it uses the 802.1AS profile required by the Mac.
 
 Separately, each link on the path between the grandmaster and the Mac must pass the 802.1AS peer-delay check.
 The TimeSync port used here reports a fixed upper limit of 1000 ns and does not become `asCapable` when the measured delay exceeds it.
@@ -31,9 +32,8 @@ AVB switches are a purpose-built but expensive option.
 An ordinary Ethernet switch will not work because it does not participate in the peer-delay exchange.
 
 The tested general-purpose alternative uses a multiport Linux mini-PC running `ptp4l` as a boundary clock, with direct cables from the boundary clock to the grandmaster and the Mac.
-Good performance from this arrangement requires PTP hardware timestamping on each port and working PCIe Precision Time Measurement (PTM), so that Linux can cross-timestamp each port's PTP hardware clock against the system clock accurately.
+Good performance from this arrangement requires PTP hardware timestamping on each port and working [PCIe Precision Time Measurement (PTM)](https://satpulse.net/hardware/ptm.html), so that Linux can cross-timestamp each port's PTP hardware clock against the system clock accurately.
 Run `phc_ctl eth1` and check that it reports `has cross timestamping support` to verify that PTM is working for a port.
-[Checking for PTM support](https://satpulse.net/hardware/ptm.html) explains this test.
 PTM does not work on processors before Intel's 12th generation.
 For a mini-PC, an N5105 or later processor with Intel I226 ports is a good rule of thumb.
 The [test setup](docs/test-setup.md) describes the working N5105 boundary clock and the complete three-machine configuration.
@@ -60,7 +60,7 @@ The [libgptp](docs/libgptp.md) page describes the interface.
 
 ## The programs
 
-`gptp-refclock INTERFACE` is a chrony reference clock.
+`gptp-refclock` is a chrony reference clock.
 It compares the gPTP mapping with the system clock and sends the differences to chrony as complete SOCK samples.
 chrony uses these samples to make the system clock follow the grandmaster.
 With the chrony configuration given in [gptp-refclock](docs/gptp-refclock.md), the system clock tracked the grandmaster with a residual of 0.6 us RMS.
@@ -91,10 +91,6 @@ If another macOS release renames a class or selector, the library fails at start
 `tsdump` then shows what the class provides in that release.
 The refclock has to run as root only because chrony creates its socket with permissions that allow only root to write to it.
 
-## Files
+## Documentation
 
-- `gptp.h`, `gptp.m`: the library.
-- `gptp-refclock.c`, `chrony-client.c`, `chrony-client.h`: the refclock and the chrony SOCK client.
-- `gptp-pps-offset.c`: the PPS path measurement.
-- `tsdump.m`: the class lister.
-- `docs/`: [libgptp](docs/libgptp.md), [the TimeSync framework as observed](docs/timesync.md), [gptp-refclock](docs/gptp-refclock.md), [gptp-pps-offset](docs/gptp-pps-offset.md) and the [test setup](docs/test-setup.md).
+The [documentation index](docs/README.md) covers the library, programs, private framework and test setup.
